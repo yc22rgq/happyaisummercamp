@@ -1,73 +1,61 @@
-import logging
+import openai
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import ContentType
-import aiohttp
-import asyncio
+from config import settings
 
-API_TOKEN = 'YOUR_TELEGRAM_BOT_API_TOKEN'
-WHISPER_API_URL = 'https://api.openai.com/v1/whisper'
-ASSISTANT_API_URL = 'https://api.openai.com/v1/assistant'
-TTS_API_URL = 'https://api.openai.com/v1/tts'
-OPENAI_API_KEY = 'YOUR_OPENAI_API_KEY'
-
-logging.basicConfig(level=logging.INFO)
-
-bot = Bot(token=API_TOKEN)
+bot = Bot(token=settings.telegram_token)
 dp = Dispatcher(bot)
-
-
-async def transcribe_voice(file_path):
-    async with aiohttp.ClientSession() as session:
-        async with session.post(
-            WHISPER_API_URL,
-            headers={'Authorization': f'Bearer {OPENAI_API_KEY}'},
-            data={'file': open(file_path, 'rb')}
-        ) as response:
-            result = await response.json()
-            return result['text']
-
-
-async def get_assistant_response(text):
-    async with aiohttp.ClientSession() as session:
-        async with session.post(
-            ASSISTANT_API_URL,
-            headers={'Authorization': f'Bearer {OPENAI_API_KEY}'},
-            json={'prompt': text}
-        ) as response:
-            result = await response.json()
-            return result['choices'][0]['text']
-
-
-async def text_to_speech(text):
-    async with aiohttp.ClientSession() as session:
-        async with session.post(
-            TTS_API_URL,
-            headers={'Authorization': f'Bearer {OPENAI_API_KEY}'},
-            json={'text': text}
-        ) as response:
-            result = await response.json()
-            return result['audio_content']
-
 
 @dp.message_handler(content_types=ContentType.VOICE)
 async def handle_voice_message(message: types.Message):
     voice = await message.voice.get_file()
-    file_path = f'downloads/{voice.file_id}.ogg'
-    await bot.download_file(voice.file_path, file_path)
+    voice_file_path = f"downloads/{voice.file_id}.ogg"
+    await bot.download_file(voice.file_path, voice_file_path)
 
-    transcribed_text = await transcribe_voice(file_path)
-    assistant_response = await get_assistant_response(transcribed_text)
-    audio_content = await text_to_speech(assistant_response)
+    # Конвертация голосового сообщения в текст
+    with open(voice_file_path, "rb") as audio_file:
+        transcript = openai.Audio.transcribe("whisper-1", audio_file)
 
-    with open(f'{voice.file_id}.mp3', 'wb') as audio_file:
-        audio_file.write(audio_content)
+    await message.reply(transcript["text"])
 
-    await message.reply_voice(types.InputFile(f'{voice.file_id}.mp3'))
+async def get_openai_response(prompt: str) -> str:
+    response = await openai.ChatCompletion.create(
+        model="gpt-3.5-turbo",
+        messages=[{"role": "user", "content": prompt}],
+        api_key=settings.openai_api_key
+    )
+    return response.choices[0].message["content"]
+
+async def text_to_speech(text: str) -> bytes:
+    response = await openai.Audio.create(
+        model="text-to-speech-1",
+        input=text,
+        api_key=settings.openai_api_key
+    )
+    return response["audio"]
+
+@dp.message_handler(content_types=ContentType.VOICE)
+async def handle_voice_message(message: types.Message):
+    voice = await message.voice.get_file()
+    voice_file_path = f"downloads/{voice.file_id}.ogg"
+    await bot.download_file(voice.file_path, voice_file_path)
+
+    # Конвертация голосового сообщения в текст
+    with open(voice_file_path, "rb") as audio_file:
+        transcript = openai.Audio.transcribe("whisper-1", audio_file)
+
+    user_text = transcript["text"]
+    response_text = await get_openai_response(user_text)
+
+    # Озвучка ответа
+    audio_data = await text_to_speech(response_text)
+    audio_file_path = f"downloads/{voice.file_id}_response.ogg"
+    with open(audio_file_path, "wb") as audio_file:
+        audio_file.write(audio_data)
+
+    await message.reply_voice(types.InputFile(audio_file_path))
 
 
-async def main():
-    await dp.start_polling()
-
-
-if __name__ == '__main__':
-    asyncio.run(main())
+if __name__ == "__main__":
+    from aiogram import executor
+    executor.start_polling(dp, skip_updates=True)
